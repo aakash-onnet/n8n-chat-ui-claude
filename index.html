@@ -245,6 +245,14 @@
       border: 1px solid var(--border);
       border-radius: 4px var(--radius) var(--radius) var(--radius);
     }
+    .chat-image {
+      max-width: 100%;
+      max-height: 500px;
+      border-radius: 12px;
+      margin-top: 10px;
+      display: block;
+      cursor: zoom-in;
+    }
     .bubble.user {
       background: var(--user-bg);
       border: 1px solid var(--user-border);
@@ -1121,38 +1129,200 @@ function appendUserMessage(text, images = []) {
   scrollToBottom();
 }
 
-async function appendAiMessage(text) {
+async function appendAiMessage(data) {
+
   hideWelcome();
+
   const msgs = document.getElementById('messages');
+
   const row = document.createElement('div');
+
   row.className = 'msg-row';
 
-  const rawHtml = DOMPurify.sanitize(marked.parse(text), {
-    ADD_TAGS: ['pre', 'code', 'img', 'div', 'button', 'svg', 'path', 'polyline', 'rect', 'line', 'polygon', 'span'],
-    ADD_ATTR: [
-      'class', 'id', 'style', 'onclick', 'data-mermaid-id', 'loading',
-      'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
-      'd', 'cx', 'cy', 'r', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'width', 'height',
-      'points', 'rx', 'title', 'alt', 'src',
+  // =====================================================
+  // STEP 1 — Extract response text
+  // =====================================================
+
+  let content =
+    data.output ||
+    data.text ||
+    data.message ||
+    data.response ||
+    '';
+
+  // Normalize escaped newlines
+
+  content = content.replace(/\\n/g, '\n');
+
+  // =====================================================
+  // STEP 2 — Parse markdown
+  // =====================================================
+
+  marked.setOptions({
+    breaks: true,
+    gfm: true,
+  });
+
+  let html = marked.parse(content);
+
+  // =====================================================
+  // STEP 3 — Inject Mermaid diagrams
+  // =====================================================
+
+  if (Array.isArray(data.diagrams)) {
+
+    data.diagrams.forEach((diagram) => {
+
+      const replacement = `
+        <div class="diagram-wrapper">
+
+          <img
+            src="${diagram.imageUrl}"
+            class="chat-image diagram-image"
+            loading="lazy"
+            onclick="openLightbox(this)"
+          />
+
+          <div class="diagram-actions">
+            <a
+              href="${diagram.editUrl}"
+              target="_blank"
+              class="diagram-link"
+            >
+              Edit Diagram
+            </a>
+          </div>
+
+        </div>
+      `;
+
+      html = html.replaceAll(
+        diagram.ref,
+        replacement
+      );
+    });
+  }
+
+  // =====================================================
+  // STEP 4 — Inject document images
+  // =====================================================
+
+  if (Array.isArray(data.documentImages)) {
+
+    data.documentImages.forEach((img) => {
+
+      const replacement = `
+        <div class="doc-image-wrapper">
+
+          <img
+            src="data:${img.mime_type};base64,${img.base64}"
+            alt="${img.caption || 'Document image'}"
+            class="chat-image"
+            loading="lazy"
+            onclick="openLightbox(this)"
+          />
+
+          ${
+            img.caption
+              ? `
+                <div class="image-caption">
+                  ${escapeHtml(img.caption)}
+                </div>
+              `
+              : ''
+          }
+
+        </div>
+      `;
+
+      html = html.replaceAll(
+        img.ref,
+        replacement
+      );
+    });
+  }
+
+  // =====================================================
+  // STEP 5 — Sanitize
+  // =====================================================
+
+  html = DOMPurify.sanitize(html, {
+    ADD_TAGS: [
+      'img',
+      'div',
+      'span',
+      'pre',
+      'code',
+      'svg',
+      'path',
+      'button',
     ],
+
+    ADD_ATTR: [
+      'class',
+      'src',
+      'href',
+      'target',
+      'loading',
+      'onclick',
+      'alt',
+      'style',
+    ],
+
+    ALLOWED_URI_REGEXP:
+      /^(?:(?:https?|mailto|ftp|tel|file|data):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+
     FORCE_BODY: true,
   });
 
-  const botInitial = (config.botName || 'AI').charAt(0).toUpperCase();
+  // =====================================================
+  // STEP 6 — Build UI
+  // =====================================================
+
+  const botInitial =
+    (config.botName || 'AI')
+      .charAt(0)
+      .toUpperCase();
 
   row.innerHTML = `
-    <div class="avatar ai">${botInitial}</div>
-    <div>
-      <div class="bubble ai"><div class="md-content">${rawHtml}</div></div>
-      <div class="msg-meta">${formatTime(new Date())}</div>
-    </div>`;
+    <div class="avatar ai">
+      ${botInitial}
+    </div>
+
+    <div class="message-wrapper">
+
+      <div class="bubble ai">
+        <div class="md-content">
+          ${html}
+        </div>
+      </div>
+
+      <div class="msg-meta">
+        ${formatTime(new Date())}
+      </div>
+
+    </div>
+  `;
 
   msgs.appendChild(row);
+
   scrollToBottom();
 
-  // Render any mermaid diagrams inside this bubble
+  // =====================================================
+  // STEP 7 — Render Mermaid
+  // =====================================================
+
   await renderMermaidInElement(row);
+
   scrollToBottom();
+}
+
+function escapeHtml(str = '') {
+  const div = document.createElement('div');
+
+  div.textContent = str;
+
+  return div.innerHTML;
 }
 
 function appendErrorMessage(errText) {
@@ -1362,6 +1532,8 @@ async function sendMessage() {
       body: JSON.stringify(payload),
     });
 
+    // const response = await fetch('data.json');
+
     removeTypingIndicator();
 
     if (!response.ok) {
@@ -1370,19 +1542,13 @@ async function sendMessage() {
 
     const data = await response.json();
 
-    const reply =
-      data?.output  ??
-      data?.text    ??
-      data?.message ??
-      data?.response ??
-      (typeof data === 'string' ? data : null);
-
-    if (reply) {
-      await appendAiMessage(reply);
+    if (data) {
+      await appendAiMessage(data);
     } else {
-      appendErrorMessage('Received an empty response from the AI. Check your n8n workflow output.');
+      appendErrorMessage(
+        'Received an empty response from AI.'
+      );
     }
-
   } catch (err) {
     removeTypingIndicator();
     appendErrorMessage(`Could not reach the workflow: ${err.message}. Make sure the webhook URL is correct and the workflow is active.`);
